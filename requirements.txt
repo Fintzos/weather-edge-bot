@@ -1,0 +1,6 @@
+requests>=2.31.0
+python-dotenv>=1.0.0
+colorama>=0.4.6
+
+# Για live trading — uncomment όταν είσαι έτοιμος:
+# py-clob-client>=0.17.0

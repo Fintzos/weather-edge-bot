@@ -1,0 +1,5 @@
+19:56:45  Gamma API error: HTTPSConnectionPool(host='gamma-api.polymarket.com', port=443): Max retries exceeded with url: /markets?active=true&closed=false&limit=300&tag_slug=weather (Caused by NameResolutionError("HTTPSConnection(host='gamma-api.polymarket.com', port=443): Failed to resolve 'gamma-api.polymarket.com' ([Errno 11001] getaddrinfo failed)"))
+19:56:45  Found 0 liquid weather markets
+20:03:20  NWS failed for New York (KLGA): HTTPSConnectionPool(host='api.weather.gov', port=443): Read timed out. (read timeout=10)
+20:03:20    NWS failed for New York, trying OpenMeteo fallback...
+20:07:56  Found 1 liquid weather markets
