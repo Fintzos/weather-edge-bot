@@ -1,14 +1,18 @@
 """
-Polymarket Weather Trading Bot  v2.1
+Polymarket Weather Trading Bot  v2.1.1
 ======================================
-Fixes από v2:
+Fixes από v2.1:
+  ✓ AI_GATEKEEPER default = True        (safe by default — αν AI πέσει, δεν παίρνει trade)
+  ✓ tokens[1] bounds check              (len >= 2 + isinstance για να μην σκάει)
+  ✓ prob_for_display για NO side        (δείχνει P(NO) στο signal, όχι P(YES))
+  ✓ NWS timezone-aware date compare     (datetime.fromisoformat — σωστό γύρω από midnight)
   ✓ Shared HTTP session + auto-retries  (δεν σκάει από timeout)
   ✓ None αντί για [] σε API failure     (ξέρεις αν το API έπεσε)
   ✓ Anti-duplicate position check       (δεν ανοίγει ίδιο trade 2 φορές)
   ✓ Σωστό EV = p*(1/price) - 1          (πραγματικό expected value per $1)
   ✓ yes_token_id / no_token_id          (σωστά token ids για live trading)
   ✓ Καλύτερο regex για temp buckets     (πιάνει "72 to 73", "72-73 F" κλπ)
-  ✓ AI gatekeeper = False σε failure    (δεν παίρνει trade αν AI πέσει)
+  ✓ AI gatekeeper = True σε failure     (safe by default — αν AI πέσει, δεν παίρνει trade)
   ✓ NWS: φιλτράρει σημερινό period      (δεν πιάνει λάθος μέρα)
 
 Setup:
@@ -53,7 +57,7 @@ MAX_BET_USDC       = float(os.getenv("MAX_BET_USDC", "10"))
 MIN_VOLUME_USDC    = float(os.getenv("MIN_VOLUME", "500"))
 DRY_RUN            = os.getenv("DRY_RUN", "true").lower() == "true"
 SCAN_INTERVAL_SECS = int(os.getenv("SCAN_INTERVAL", "300"))
-AI_GATEKEEPER      = os.getenv("AI_GATEKEEPER", "false").lower() == "true"
+AI_GATEKEEPER      = os.getenv("AI_GATEKEEPER", "true").lower() == "true"
 POSITIONS_FILE     = "positions.json"
 
 CLOB_BASE  = "https://clob.polymarket.com"
@@ -136,7 +140,6 @@ class TradeSignal:
 # ── Weather: NWS (US cities) ──────────────────────────────────────────────────
 def get_nws_forecast(city: str) -> Optional[WeatherForecast]:
     station, lat, lon, _ = CITIES[city]
-    today_str = datetime.now().strftime("%Y-%m-%d")
     try:
         meta = SESSION.get(
             f"https://api.weather.gov/points/{lat},{lon}",
@@ -153,14 +156,22 @@ def get_nws_forecast(city: str) -> Optional[WeatherForecast]:
         precip_prob = 0
         condition   = "unknown"
 
+        # Use timezone-aware "today" to avoid midnight edge cases
+        today_date = datetime.now(timezone.utc).date()
+
         # First try: today's daytime period
         for p in periods[:6]:
             start = p.get("startTime", "")
-            if p.get("isDaytime", False) and today_str in start:
-                temp_max_f  = float(p["temperature"])
-                precip_prob = float(p.get("probabilityOfPrecipitation", {}).get("value") or 0)
-                condition   = _parse_condition(p.get("shortForecast", ""))
-                break
+            if p.get("isDaytime", False) and start:
+                try:
+                    period_date = datetime.fromisoformat(start).date()
+                except ValueError:
+                    period_date = None
+                if period_date == today_date:
+                    temp_max_f  = float(p["temperature"])
+                    precip_prob = float(p.get("probabilityOfPrecipitation", {}).get("value") or 0)
+                    condition   = _parse_condition(p.get("shortForecast", ""))
+                    break
 
         # Fallback: first daytime period
         if temp_max_f is None:
@@ -305,7 +316,7 @@ def get_weather_markets() -> Optional[list[Market]]:
         yes_token_id = ""
         no_token_id  = ""
 
-        if tokens and isinstance(tokens[0], dict):
+        if len(tokens) >= 2 and isinstance(tokens[0], dict) and isinstance(tokens[1], dict):
             yes_price    = float(tokens[0].get("price", 0.5))
             no_price     = float(tokens[1].get("price", 0.5))
             outcome_yes  = tokens[0].get("outcome", "Yes")
@@ -582,7 +593,7 @@ def print_banner():
     mode = f"{Fore.YELLOW}DRY RUN (paper){Style.RESET_ALL}" if DRY_RUN else f"{Fore.RED}LIVE TRADING{Style.RESET_ALL}"
     print(f"""
 {Fore.BLUE}========================================================
-   Polymarket Weather Bot  v2.1
+   Polymarket Weather Bot  v2.1.1
    Airport coords | NWS | Kelly | Real EV | No Dupes
 ========================================================{Style.RESET_ALL}
   Mode     : {mode}
@@ -605,11 +616,12 @@ def print_forecast(f: WeatherForecast):
 def print_signal(s: TradeSignal):
     clr  = Fore.GREEN if s.edge > 0.15 else (Fore.YELLOW if s.edge > 0 else Fore.RED)
     tkid = s.market.yes_token_id if s.side == "YES" else s.market.no_token_id
+    prob_for_display = s.model_prob if s.side == "YES" else 1 - s.model_prob
     print(
         f"\n{clr}  SIGNAL  BUY {s.side}  "
         f"edge={s.edge:+.0%}  EV={s.ev:+.2f}  Kelly=${s.kelly_size:.2f}{Style.RESET_ALL}\n"
         f"    Market   : {s.market.question[:68]}\n"
-        f"    Prices   : market={s.market_prob:.0%}  model={s.model_prob:.0%}\n"
+        f"    Prices   : market={s.market_prob:.0%}  model={prob_for_display:.0%}\n"
         f"    Reason   : {s.reasoning}\n"
         f"    Volume   : ${s.market.volume_usdc:,.0f}   expires {s.market.end_date[:10]}\n"
         f"    Token ID : {tkid or '(not found)'}"
