@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Weather Edge Bot — Dashboard</title>
+<style>
+  :root {
+    --bg:      #0d0f14;
+    --surface: #13161e;
+    --border:  #1e2230;
+    --text:    #e2e8f0;
+    --muted:   #64748b;
+    --green:   #22c55e;
+    --red:     #ef4444;
+    --amber:   #f59e0b;
+    --blue:    #3b82f6;
+    --cyan:    #06b6d4;
+    --font:    'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: var(--font); font-size: 12px; min-height: 100vh; }
+
+  /* ── Top bar ── */
+  .topbar { display: flex; align-items: center; justify-content: space-between; padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--surface); }
+  .topbar-left { display: flex; align-items: center; gap: 12px; }
+  .logo { font-size: 13px; font-weight: 700; color: var(--cyan); letter-spacing: 0.05em; }
+  .mode-badge { font-size: 10px; padding: 2px 8px; border-radius: 3px; font-weight: 600; letter-spacing: 0.06em; }
+  .mode-dry  { background: #1e3a2a; color: var(--green); border: 1px solid #2d5a3d; }
+  .mode-live { background: #3a1e1e; color: var(--red);   border: 1px solid #5a2d2d; }
+  .topbar-right { display: flex; align-items: center; gap: 16px; color: var(--muted); font-size: 11px; }
+  .live-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--green); margin-right: 5px; animation: blink 2s infinite; }
+  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }
+  .stale-dot { background: var(--amber) !important; animation: none !important; }
+  .error-dot { background: var(--red) !important; animation: none !important; }
+
+  /* ── Stat cards ── */
+  .stats-row { display: flex; gap: 1px; background: var(--border); border-bottom: 1px solid var(--border); }
+  .stat-card { flex: 1; background: var(--surface); padding: 10px 14px; }
+  .stat-card .val { font-size: 20px; font-weight: 700; line-height: 1.2; }
+  .stat-card .lbl { font-size: 10px; color: var(--muted); margin-top: 2px; letter-spacing: 0.06em; text-transform: uppercase; }
+  .val-green { color: var(--green); }
+  .val-amber { color: var(--amber); }
+  .val-red   { color: var(--red);   }
+  .val-cyan  { color: var(--cyan);  }
+
+  /* ── Filter bar ── */
+  .filter-bar { display: flex; align-items: center; gap: 6px; padding: 8px 14px; border-bottom: 1px solid var(--border); background: var(--surface); }
+  .filter-label { color: var(--muted); font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; margin-right: 4px; }
+  .fbtn { font-family: var(--font); font-size: 11px; padding: 3px 10px; border-radius: 3px; border: 1px solid var(--border); background: transparent; color: var(--muted); cursor: pointer; transition: all .15s; }
+  .fbtn:hover { border-color: #334155; color: var(--text); }
+  .fbtn.active { background: #1e2230; color: var(--text); border-color: #334155; }
+  .spacer { flex: 1; }
+  .refresh-info { font-size: 10px; color: var(--muted); }
+
+  /* ── Table ── */
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; }
+  thead th {
+    font-size: 10px; font-weight: 500; color: var(--muted);
+    letter-spacing: 0.08em; text-transform: uppercase;
+    padding: 7px 10px; border-bottom: 1px solid var(--border);
+    background: var(--surface); white-space: nowrap; position: sticky; top: 0;
+  }
+  tbody tr { border-bottom: 1px solid var(--border); transition: background .1s; }
+  tbody tr:hover { background: #161923; }
+  tbody td { padding: 6px 10px; white-space: nowrap; vertical-align: middle; }
+  .rank-cell  { color: var(--muted); font-size: 11px; width: 30px; }
+  .city-cell  { font-weight: 600; font-size: 12px; min-width: 110px; }
+  .hot-icon   { font-size: 10px; margin-left: 4px; }
+  .vol-cell   { text-align: right; color: var(--text); }
+  .bucket-cell { color: var(--muted); font-size: 11px; max-width: 130px; overflow: hidden; text-overflow: ellipsis; }
+  .forecast-cell { text-align: right; }
+  .mkt-cell   { text-align: right; color: var(--muted); font-size: 11px; }
+  .edge-cell  { text-align: right; }
+
+  /* ── Badges ── */
+  .badge { display: inline-block; padding: 2px 7px; border-radius: 3px; font-size: 10px; font-weight: 600; letter-spacing: 0.04em; }
+  .b-edge    { background: #14532d; color: #86efac; border: 1px solid #166534; }
+  .b-aligned { background: #1e2230; color: var(--muted); border: 1px solid var(--border); }
+  .b-off     { background: #450a0a; color: #fca5a5; border: 1px solid #7f1d1d; }
+  .b-nodata  { background: #1c1f2b; color: #475569; border: 1px solid #2d3445; font-style: italic; }
+
+  /* ── Signal detail row ── */
+  .detail-row td { padding: 0; }
+  .detail-inner { padding: 8px 10px 10px 44px; background: #0f1117; border-bottom: 1px solid var(--border); font-size: 11px; color: var(--muted); }
+  .detail-inner strong { color: var(--text); }
+  .detail-grid { display: flex; gap: 20px; flex-wrap: wrap; margin-top: 4px; }
+  .detail-item { display: flex; flex-direction: column; gap: 1px; }
+  .detail-item .dk { font-size: 9px; text-transform: uppercase; letter-spacing: 0.08em; }
+  .detail-item .dv { font-size: 12px; color: var(--text); font-weight: 600; }
+
+  /* ── Positions panel ── */
+  .positions-panel { padding: 12px 14px; border-top: 1px solid var(--border); background: var(--surface); }
+  .panel-title { font-size: 11px; color: var(--cyan); letter-spacing: 0.08em; text-transform: uppercase; margin-bottom: 8px; }
+  .pos-row { display: flex; gap: 12px; align-items: center; padding: 5px 0; border-bottom: 1px solid var(--border); font-size: 11px; }
+  .pos-row:last-child { border-bottom: none; }
+  .pos-side-yes { color: var(--green); font-weight: 700; }
+  .pos-side-no  { color: var(--red);   font-weight: 700; }
+  .pos-mkt { flex: 1; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .no-pos { color: var(--muted); font-size: 11px; font-style: italic; }
+
+  /* ── Error banner ── */
+  .error-banner { background: #3a1e1e; border: 1px solid #7f1d1d; color: #fca5a5; padding: 10px 16px; font-size: 12px; display: none; }
+  .error-banner.visible { display: block; }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-left">
+    <span class="logo">⛅ WEATHER EDGE BOT</span>
+    <span class="mode-badge mode-dry" id="mode-badge">DRY RUN</span>
+  </div>
+  <div class="topbar-right">
+    <span><span class="live-dot" id="status-dot"></span><span id="status-text">waiting for data...</span></span>
+    <span id="cycle-info"></span>
+  </div>
+</div>
+
+<div class="error-banner" id="error-banner">
+  ⚠ Gamma API unreachable — markets data unavailable this scan
+</div>
+
+<div class="stats-row">
+  <div class="stat-card"><div class="val val-cyan"  id="s-cities">—</div><div class="lbl">cities</div></div>
+  <div class="stat-card"><div class="val val-green" id="s-signals">—</div><div class="lbl">edge signals</div></div>
+  <div class="stat-card"><div class="val val-amber" id="s-markets">—</div><div class="lbl">markets</div></div>
+  <div class="stat-card"><div class="val val-cyan"  id="s-open">—</div><div class="lbl">open positions</div></div>
+  <div class="stat-card"><div class="val"           id="s-trades">—</div><div class="lbl">total trades</div></div>
+</div>
+
+<div class="filter-bar">
+  <span class="filter-label">filter</span>
+  <button class="fbtn active" onclick="setFilter('all',this)">all cities</button>
+  <button class="fbtn"        onclick="setFilter('edge',this)">edge only</button>
+  <button class="fbtn"        onclick="setFilter('aligned',this)">aligned</button>
+  <button class="fbtn"        onclick="setFilter('hot',this)">high vol</button>
+  <div class="spacer"></div>
+  <span class="refresh-info">auto-refresh every 15s</span>
+</div>
+
+<div class="table-wrap">
+<table>
+  <thead>
+    <tr>
+      <th style="width:30px">#</th>
+      <th style="text-align:left">city</th>
+      <th style="text-align:right">24h vol</th>
+      <th>bucket / question</th>
+      <th style="text-align:right">forecast</th>
+      <th style="text-align:right">model prob</th>
+      <th style="text-align:right">mkt price</th>
+      <th style="text-align:right">edge?</th>
+    </tr>
+  </thead>
+  <tbody id="table-body"></tbody>
+</table>
+</div>
+
+<div class="positions-panel">
+  <div class="panel-title">open positions</div>
+  <div id="positions-list"><span class="no-pos">no open positions</span></div>
+</div>
+
+<script>
+let currentFilter = 'all';
+let lastData = null;
+let expandedCity = null;
+
+function setFilter(f, btn) {
+  currentFilter = f;
+  document.querySelectorAll('.fbtn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  if (lastData) renderTable(lastData);
+}
+
+function fmtVol(n) {
+  if (!n) return '$0';
+  if (n >= 1e6) return '$' + (n/1e6).toFixed(1) + 'M';
+  if (n >= 1e3) return '$' + (n/1e3).toFixed(0) + 'k';
+  return '$' + n;
+}
+
+function fmtEdge(e) {
+  return (e >= 0 ? '+' : '') + (e * 100).toFixed(1) + '%';
+}
+
+function ageText(ts) {
+  const secs = Math.floor((Date.now() - new Date(ts).getTime()) / 1000);
+  if (secs < 60) return secs + 's ago';
+  if (secs < 3600) return Math.floor(secs/60) + 'm ago';
+  return Math.floor(secs/3600) + 'h ago';
+}
+
+function renderStats(d) {
+  document.getElementById('s-cities').textContent  = d.cities.length;
+  document.getElementById('s-signals').textContent = d.signals_found;
+  document.getElementById('s-markets').textContent = d.markets_found;
+  document.getElementById('s-open').textContent    = d.open_positions;
+  document.getElementById('s-trades').textContent  = d.total_trades;
+
+  const badge = document.getElementById('mode-badge');
+  badge.textContent = d.dry_run ? 'DRY RUN' : 'LIVE';
+  badge.className = 'mode-badge ' + (d.dry_run ? 'mode-dry' : 'mode-live');
+
+  const dot  = document.getElementById('status-dot');
+  const txt  = document.getElementById('status-text');
+  const age  = Math.floor((Date.now() - new Date(d.ts).getTime()) / 1000);
+  if (age > 600) { dot.className = 'live-dot stale-dot'; txt.textContent = 'stale — ' + ageText(d.ts); }
+  else           { dot.className = 'live-dot';            txt.textContent = 'live · ' + ageText(d.ts); }
+
+  document.getElementById('cycle-info').textContent = 'scan #' + d.cycle;
+  document.getElementById('error-banner').className = 'error-banner' + (d.gamma_ok ? '' : ' visible');
+}
+
+function renderPositions(d) {
+  const el = document.getElementById('positions-list');
+  if (!d.open_positions_detail || d.open_positions_detail.length === 0) {
+    el.innerHTML = '<span class="no-pos">no open positions</span>';
+    return;
+  }
+  el.innerHTML = d.open_positions_detail.map(p => `
+    <div class="pos-row">
+      <span class="${p.side === 'YES' ? 'pos-side-yes' : 'pos-side-no'}">${p.side}</span>
+      <span>$${p.size.toFixed(2)}</span>
+      <span style="color:var(--muted)">@${(p.entry_price*100).toFixed(0)}%</span>
+      <span style="color:${p.edge >= 0 ? 'var(--green)' : 'var(--red)'}">${fmtEdge(p.edge)}</span>
+      <span class="pos-mkt">${p.market}</span>
+      <span style="color:var(--muted);font-size:10px">exp ${p.expires}</span>
+    </div>
+  `).join('');
+}
+
+function buildDetailRow(city, sig) {
+  if (!sig) return '';
+  const sideColor = sig.side === 'YES' ? 'var(--green)' : 'var(--red)';
+  return `<tr class="detail-row" id="detail-${city.replace(/\s/g,'_')}">
+    <td colspan="8">
+      <div class="detail-inner">
+        <strong>${sig.question}</strong>
+        <div class="detail-grid" style="margin-top:6px">
+          <div class="detail-item"><span class="dk">side</span><span class="dv" style="color:${sideColor}">${sig.side}</span></div>
+          <div class="detail-item"><span class="dk">edge</span><span class="dv" style="color:var(--green)">${fmtEdge(sig.edge)}</span></div>
+          <div class="detail-item"><span class="dk">ev</span><span class="dv">${fmtEdge(sig.ev)}</span></div>
+          <div class="detail-item"><span class="dk">model</span><span class="dv">${(sig.model_prob*100).toFixed(0)}%</span></div>
+          <div class="detail-item"><span class="dk">market</span><span class="dv">${(sig.market_prob*100).toFixed(0)}%</span></div>
+          <div class="detail-item"><span class="dk">kelly $</span><span class="dv">$${sig.kelly}</span></div>
+          <div class="detail-item"><span class="dk">vol</span><span class="dv">${fmtVol(sig.mkt_vol)}</span></div>
+          <div class="detail-item"><span class="dk">expires</span><span class="dv">${sig.expires}</span></div>
+        </div>
+        <div style="margin-top:6px;color:var(--muted);font-size:10px">reasoning: ${sig.reasoning}</div>
+      </div>
+    </td>
+  </tr>`;
+}
+
+function renderTable(d) {
+  const rows = d.cities.filter(r => {
+    if (currentFilter === 'edge')    return r.has_signal && r.signal && r.signal.edge >= 0.05;
+    if (currentFilter === 'aligned') return !r.has_signal;
+    if (currentFilter === 'hot')     return r.vol_24h >= 10000;
+    return true;
+  });
+
+  const tbody = document.getElementById('table-body');
+  let html = '';
+
+  rows.forEach((r, i) => {
+    const isHot = r.vol_24h >= 30000;
+    const sig   = r.signal;
+    const cityId = r.city.replace(/\s/g,'_');
+    const isExpanded = expandedCity === cityId;
+
+    let edgeBadge, modelCell, mktCell;
+    if (sig) {
+      const e = sig.edge;
+      if      (e >= 0.08)  edgeBadge = `<span class="badge b-edge">${fmtEdge(e)} EDGE</span>`;
+      else if (e >= 0.01)  edgeBadge = `<span class="badge b-edge">${fmtEdge(e)} EDGE</span>`;
+      else                 edgeBadge = `<span class="badge b-off">${fmtEdge(e)} OFF</span>`;
+      modelCell = `<span style="color:${sig.model_prob > sig.market_prob ? 'var(--green)' : 'var(--red)'}">${(sig.model_prob*100).toFixed(0)}%</span>`;
+      mktCell   = `${(sig.market_prob*100).toFixed(0)}%`;
+    } else {
+      edgeBadge = `<span class="badge b-aligned">aligned</span>`;
+      modelCell = `<span style="color:var(--muted)">—</span>`;
+      mktCell   = `<span style="color:var(--muted)">—</span>`;
+    }
+
+    const bucketText = sig ? sig.bucket.slice(0, 28) : (r.condition || '—');
+    const forecastText = `${r.forecast_f.toFixed(0)}F / ${r.forecast_c.toFixed(1)}C`;
+
+    html += `<tr style="cursor:pointer" onclick="toggleDetail('${cityId}')">
+      <td class="rank-cell">${i+1}</td>
+      <td class="city-cell">${r.city}${isHot ? '<span class="hot-icon">🔥</span>' : ''}</td>
+      <td class="vol-cell">${fmtVol(r.vol_24h)}</td>
+      <td class="bucket-cell" title="${sig ? sig.question : ''}">${bucketText}</td>
+      <td class="forecast-cell">${forecastText}</td>
+      <td style="text-align:right">${modelCell}</td>
+      <td class="mkt-cell">${mktCell}</td>
+      <td class="edge-cell">${edgeBadge}</td>
+    </tr>`;
+
+    if (isExpanded && sig) {
+      html += buildDetailRow(r.city, sig);
+    }
+  });
+
+  if (!html) {
+    html = `<tr><td colspan="8" style="text-align:center;padding:24px;color:var(--muted)">no cities match filter</td></tr>`;
+  }
+
+  tbody.innerHTML = html;
+}
+
+function toggleDetail(cityId) {
+  expandedCity = expandedCity === cityId ? null : cityId;
+  if (lastData) renderTable(lastData);
+}
+
+async function refresh() {
+  try {
+    const resp = await fetch('scan_results.json?_=' + Date.now());
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const data = await resp.json();
+    lastData = data;
+    renderStats(data);
+    renderTable(data);
+    renderPositions(data);
+  } catch(e) {
+    const dot = document.getElementById('status-dot');
+    dot.className = 'live-dot error-dot';
+    document.getElementById('status-text').textContent = 'scan_results.json not found — bot running?';
+  }
+}
+
+refresh();
+setInterval(refresh, 15000);
+</script>
+</body>
+</html>

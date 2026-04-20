@@ -1,11 +1,10 @@
 """
-Polymarket Weather Trading Bot  v2.3
+Polymarket Weather Trading Bot  v2.4
 =====================================
-Νέο σε v2.3:
-  ✓ Πλήρες logging στο bot.log          (SCAN/FORECAST/MARKETS/SIGNALS/TRADE/SKIP/SUMMARY)
-  ✓ Κάθε σημαντικό event → log.info     (όχι μόνο print που χάνεται)
-  ✓ "All Gamma API failed" → log.error  (searchable στο log)
-  ✓ Scan summary πάντα logged           (ακόμα και αν 0 signals)
+Νέο σε v2.4:
+  ✓ Live dashboard export → scan_results.json  (διαβάζεται από dashboard.html)
+  ✓ Κάθε scan γράφει forecasts + markets + signals + positions στο JSON
+  ✓ dashboard.html auto-refresh κάθε 15 δευτερόλεπτα
 
 Setup:
   pip install -r requirements.txt
@@ -536,6 +535,77 @@ def print_positions():
         print(f"  {p['side']:<4} ${p['size']:.2f}  @{p['entry_price']:.0%}  edge={p['edge']:+.0%}  {p['market'][:55]}")
 
 
+SCAN_RESULTS_FILE = "scan_results.json"
+
+def save_scan_results(
+    cycle: int,
+    forecasts: "dict[str, WeatherForecast]",
+    markets:   "list[Market] | None",
+    signals:   "list[TradeSignal]",
+    trades_executed: int,
+):
+    """Write full scan snapshot to scan_results.json for the live dashboard."""
+    pos = load_positions()
+
+    # Build per-city rows the same way the dashboard expects them
+    city_rows = []
+    market_list = markets or []
+    for city, fc in forecasts.items():
+        # Find best signal for this city (highest EV)
+        city_sigs = [s for s in signals if s.forecast.city == city]
+        best = max(city_sigs, key=lambda s: s.ev) if city_sigs else None
+
+        # Total 24h volume for this city across all matching markets
+        city_vol = sum(
+            m.volume_usdc for m in market_list
+            if any(w in m.question.lower() for w in city.lower().split())
+        )
+
+        city_rows.append({
+            "city":       city,
+            "vol_24h":    round(city_vol),
+            "forecast_c": round(fc.temp_max_c, 1),
+            "forecast_f": round(fc.temp_max_f, 1),
+            "precip":     round(fc.precip_prob),
+            "condition":  fc.condition,
+            "station":    fc.station,
+            "has_signal": best is not None,
+            "signal": {
+                "side":        best.side,
+                "edge":        round(best.edge, 3),
+                "ev":          round(best.ev, 3),
+                "model_prob":  round(best.model_prob, 3),
+                "market_prob": round(best.market_prob, 3),
+                "kelly":       best.kelly_size,
+                "question":    best.market.question[:80],
+                "bucket":      best.market.outcome_yes,
+                "mkt_vol":     round(best.market.volume_usdc),
+                "expires":     best.market.end_date[:10],
+                "reasoning":   best.reasoning,
+            } if best else None,
+        })
+
+    # Sort by 24h vol descending (matches MoonDev layout)
+    city_rows.sort(key=lambda r: r["vol_24h"], reverse=True)
+
+    snapshot = {
+        "ts":              datetime.now(timezone.utc).isoformat(),
+        "cycle":           cycle,
+        "dry_run":         DRY_RUN,
+        "gamma_ok":        markets is not None,
+        "markets_found":   len(market_list),
+        "signals_found":   len(signals),
+        "trades_executed": trades_executed,
+        "open_positions":  len(pos["open"]),
+        "total_trades":    pos["trades"],
+        "cities":          city_rows,
+        "open_positions_detail": pos["open"][-10:],
+    }
+    with open(SCAN_RESULTS_FILE, "w") as f:
+        json.dump(snapshot, f, indent=2)
+    log.info(f"[DASHBOARD] scan_results.json updated (cycle #{cycle})")
+
+
 # ── AI Confirmation (optional) ────────────────────────────────────────────────
 def ai_confirm(signal: TradeSignal) -> bool:
     if not ANTHROPIC_API_KEY:
@@ -767,6 +837,7 @@ def run():
             log.info(f"[SUMMARY] {summary}")
 
         log.info(f"=== SCAN #{cycle} END ===")
+        save_scan_results(cycle, forecasts, markets, signals, trades_this_scan)
         print(f"\n  Next scan in {SCAN_INTERVAL_SECS // 60} min.  Ctrl+C to stop.")
         time.sleep(SCAN_INTERVAL_SECS)
 
