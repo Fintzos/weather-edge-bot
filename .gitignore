@@ -1,5 +1,16 @@
+# ── Env files (secrets) ─────────────────────────
 .env
+.env.*
+!.env.example
+
+# ── Bot state / logs ────────────────────────────
 positions.json
 bot.log
+
+# ── Python cache ───────────────────────────────
 __pycache__/
 *.pyc
+
+# ── Virtual environments ───────────────────────
+.venv/
+venv/
