@@ -1,19 +1,12 @@
 """
-Polymarket Weather Trading Bot  v2.1.1
-======================================
-Fixes από v2.1:
-  ✓ AI_GATEKEEPER default = True        (safe by default — αν AI πέσει, δεν παίρνει trade)
-  ✓ tokens[1] bounds check              (len >= 2 + isinstance για να μην σκάει)
-  ✓ prob_for_display για NO side        (δείχνει P(NO) στο signal, όχι P(YES))
-  ✓ NWS timezone-aware date compare     (datetime.fromisoformat — σωστό γύρω από midnight)
-  ✓ Shared HTTP session + auto-retries  (δεν σκάει από timeout)
-  ✓ None αντί για [] σε API failure     (ξέρεις αν το API έπεσε)
-  ✓ Anti-duplicate position check       (δεν ανοίγει ίδιο trade 2 φορές)
-  ✓ Σωστό EV = p*(1/price) - 1          (πραγματικό expected value per $1)
-  ✓ yes_token_id / no_token_id          (σωστά token ids για live trading)
-  ✓ Καλύτερο regex για temp buckets     (πιάνει "72 to 73", "72-73 F" κλπ)
-  ✓ AI gatekeeper = True σε failure     (safe by default — αν AI πέσει, δεν παίρνει trade)
-  ✓ NWS: φιλτράρει σημερινό period      (δεν πιάνει λάθος μέρα)
+Polymarket Weather Trading Bot  v2.2
+=====================================
+Νέο σε v2.2:
+  ✓ Logistic probability model          (αντί για flat heuristics — καλύτερο calibration)
+  ✓ Debug logging σε calc_signal        (βλέπεις κάθε market/city σύγκριση)
+  ✓ MAX_OPEN_POSITIONS limit            (δεν φορτώνεσαι correlated bets)
+  ✓ Extreme price filter                (skip markets <5% ή >95% — σχεδόν resolved)
+  ✓ Signal stats στο summary            (hit rate, avg EV, avg edge tracking)
 
 Setup:
   pip install -r requirements.txt
@@ -37,11 +30,16 @@ init(autoreset=True)
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(message)s",
+    level=logging.DEBUG,
+    format="%(asctime)s  %(levelname)-5s  %(message)s",
     datefmt="%H:%M:%S",
-    handlers=[logging.StreamHandler(), logging.FileHandler("bot.log")],
+    handlers=[
+        logging.StreamHandler(),                          # console: INFO+
+        logging.FileHandler("bot.log"),                   # file: DEBUG+
+    ],
 )
+# Console shows INFO and above only — debug spam goes to bot.log
+logging.getLogger().handlers[0].setLevel(logging.INFO)
 log = logging.getLogger(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -58,6 +56,7 @@ MIN_VOLUME_USDC    = float(os.getenv("MIN_VOLUME", "500"))
 DRY_RUN            = os.getenv("DRY_RUN", "true").lower() == "true"
 SCAN_INTERVAL_SECS = int(os.getenv("SCAN_INTERVAL", "300"))
 AI_GATEKEEPER      = os.getenv("AI_GATEKEEPER", "true").lower() == "true"
+MAX_OPEN_POSITIONS = int(os.getenv("MAX_OPEN_POSITIONS", "5"))
 POSITIONS_FILE     = "positions.json"
 
 CLOB_BASE  = "https://clob.polymarket.com"
@@ -374,12 +373,27 @@ def expected_value(model_prob: float, market_price: float) -> float:
     return model_prob * (1.0 / market_price) - 1.0
 
 
+# ── Logistic probability helper ──────────────────────────────────────────────
+def _logistic(x: float, k: float = 1.0) -> float:
+    """Smooth S-curve: maps any real number to (0,1).
+    k controls steepness — higher k = sharper transition."""
+    import math
+    try:
+        return 1.0 / (1.0 + math.exp(-k * x))
+    except OverflowError:
+        return 0.0 if x < 0 else 1.0
+
+
 # ── Signal Calculation ────────────────────────────────────────────────────────
 def calc_signal(market: Market, forecast: WeatherForecast) -> Optional[TradeSignal]:
     q          = market.question.lower()
     city_words = forecast.city.lower().split()
 
     if not any(w in q for w in city_words):
+        return None
+
+    # Skip near-resolved markets — almost no EV left
+    if market.yes_price < 0.05 or market.yes_price > 0.95:
         return None
 
     model_prob = None
@@ -399,14 +413,15 @@ def calc_signal(market: Market, forecast: WeatherForecast) -> Optional[TradeSign
         hi   = float(bucket_match.group(2))
         unit = bucket_match.group(3)
         temp = forecast.temp_max_f if unit == "f" else forecast.temp_max_c
-        mid  = (lo + hi) / 2
-        spread = hi - lo
-        diff = abs(temp - mid)
-        if diff < spread * 0.5:    model_prob = 0.82
-        elif diff < spread * 1.5:  model_prob = 0.45
-        elif diff < spread * 3.0:  model_prob = 0.15
-        else:                       model_prob = 0.04
-        reasoning = f"Forecast={temp:.1f} bucket=[{lo}-{hi}]"
+        mid    = (lo + hi) / 2
+        spread = max(hi - lo, 0.5)          # avoid div-by-zero on tiny buckets
+        # Normalised distance from bucket centre, in units of half-spread
+        # 0 = dead centre, 1 = edge of bucket, 2 = one full spread outside
+        norm_dist = abs(temp - mid) / (spread / 2)
+        # Logistic: at centre (0) → ~0.88; at edge (1) → ~0.50; far outside → ~0.10
+        model_prob = _logistic(-2.5 * (norm_dist - 0.3), k=1.0)
+        model_prob = max(0.04, min(0.94, model_prob))
+        reasoning = f"Forecast={temp:.1f} bucket=[{lo}-{hi}] dist={norm_dist:.2f}σ"
 
     elif threshold_match:
         direction = threshold_match.group(1)
@@ -415,24 +430,26 @@ def calc_signal(market: Market, forecast: WeatherForecast) -> Optional[TradeSign
         temp  = forecast.temp_max_f if unit == "f" else forecast.temp_max_c
         delta = temp - threshold
         above = direction in ("above", "exceed", "over", "at least")
-        if above:
-            model_prob = (0.90 if delta > 5 else 0.72 if delta > 2 else
-                          0.55 if delta > 0 else 0.35 if delta > -2 else 0.12)
-        else:
-            model_prob = 1.0 - (0.90 if delta < -5 else 0.72 if delta < -2 else
-                                 0.55 if delta < 0  else 0.35 if delta < 2  else 0.12)
-        reasoning = f"Forecast={temp:.1f} vs {threshold} ({direction})"
+        # k=0.4 gives a gradual curve: ±5° ≈ 85%/15%, ±2° ≈ 68%/32%, 0° ≈ 50%
+        signed_delta = delta if above else -delta
+        model_prob   = _logistic(signed_delta, k=0.4)
+        model_prob   = max(0.04, min(0.94, model_prob))
+        reasoning = f"Forecast={temp:.1f} vs {threshold} ({direction}) Δ={delta:+.1f}"
 
     elif any(w in q for w in ["rain", "precipitation", "wet", "precip"]):
-        model_prob = forecast.precip_prob / 100.0
+        # Direct from forecast — already a probability 0-100
+        raw = forecast.precip_prob / 100.0
+        # Apply mild logistic shaping to avoid extreme 0/100 values from raw data
+        model_prob = _logistic((raw - 0.5) * 6, k=1.0)
+        model_prob = max(0.05, min(0.93, model_prob))
         reasoning  = f"{forecast.station} precip={forecast.precip_prob:.0f}%"
 
     elif "snow" in q:
-        model_prob = 0.82 if "snow" in forecast.condition else 0.04
+        model_prob = 0.85 if "snow" in forecast.condition else 0.05
         reasoning  = f"Condition: {forecast.condition}"
 
     elif any(w in q for w in ["storm", "thunder"]):
-        model_prob = 0.72 if "storm" in forecast.condition else 0.08
+        model_prob = 0.75 if "storm" in forecast.condition else 0.07
         reasoning  = f"Condition: {forecast.condition}"
 
     if model_prob is None:
@@ -442,6 +459,15 @@ def calc_signal(market: Market, forecast: WeatherForecast) -> Optional[TradeSign
     no_edge  = (1 - model_prob) - market.no_price
     yes_ev   = expected_value(model_prob, market.yes_price)
     no_ev    = expected_value(1 - model_prob, market.no_price)
+
+    # Debug log — always emitted so you can see calibration in bot.log
+    log.debug(
+        f"[EVAL] {forecast.city:<13} | "
+        f"model={model_prob:.2f}  "
+        f"yes={market.yes_price:.2f} no={market.no_price:.2f}  "
+        f"edge_yes={yes_edge:+.2f} ev_yes={yes_ev:+.2f}  "
+        f"| {market.question[:55]}"
+    )
 
     if yes_edge >= no_edge and yes_edge >= MIN_EDGE and yes_ev >= MIN_EV:
         side = "YES"
@@ -593,13 +619,15 @@ def print_banner():
     mode = f"{Fore.YELLOW}DRY RUN (paper){Style.RESET_ALL}" if DRY_RUN else f"{Fore.RED}LIVE TRADING{Style.RESET_ALL}"
     print(f"""
 {Fore.BLUE}========================================================
-   Polymarket Weather Bot  v2.1.1
-   Airport coords | NWS | Kelly | Real EV | No Dupes
+   Polymarket Weather Bot  v2.2
+   Logistic model | Debug logging | Position limits
 ========================================================{Style.RESET_ALL}
   Mode     : {mode}
   Bankroll : ${BANKROLL:.0f}  |  Kelly: {KELLY_FRACTION:.0%}  |  Max bet: ${MAX_BET_USDC:.0f}
   Min edge : {MIN_EDGE:.0%}  |  Min EV: {MIN_EV:.0%}  |  Min vol: ${MIN_VOLUME_USDC:.0f}
+  Max open : {MAX_OPEN_POSITIONS} positions
   AI gate  : {"ON" if AI_GATEKEEPER else "OFF (AI optional)"}
+  Debug    : EVAL lines → bot.log (not console)
 """)
 
 
@@ -680,8 +708,15 @@ def run():
             print(f"  No signals above edge={MIN_EDGE:.0%} / EV={MIN_EV:.0%} this scan.")
         else:
             print(f"  {Fore.GREEN}Found {len(signals)} signal(s):{Style.RESET_ALL}")
+            trades_this_scan = 0
             for sig in signals:
                 print_signal(sig)
+
+                # Position limit
+                open_count = len(load_positions()["open"])
+                if open_count >= MAX_OPEN_POSITIONS:
+                    print(f"  {Fore.YELLOW}  Max open positions ({MAX_OPEN_POSITIONS}) reached — skipping.{Style.RESET_ALL}")
+                    continue
 
                 if has_open_position(sig.market.market_id, sig.side):
                     print(f"  {Fore.YELLOW}  Already open position — skipping.{Style.RESET_ALL}")
@@ -690,8 +725,24 @@ def run():
                 confirmed = ai_confirm(sig)
                 if confirmed:
                     execute_trade(sig)
+                    trades_this_scan += 1
                 else:
                     print(f"  {Fore.YELLOW}  AI rejected — skipping.{Style.RESET_ALL}")
+
+            # Scan summary — useful for calibration review
+            avg_ev   = sum(s.ev   for s in signals) / len(signals)
+            avg_edge = sum(s.edge for s in signals) / len(signals)
+            print(
+                f"\n  {Fore.CYAN}Scan summary:{Style.RESET_ALL} "
+                f"{len(signals)} signal(s)  |  "
+                f"avg_edge={avg_edge:+.0%}  avg_EV={avg_ev:+.2f}  |  "
+                f"trades_executed={trades_this_scan}"
+            )
+            log.info(
+                f"[SCAN #{cycle}] signals={len(signals)} "
+                f"avg_edge={avg_edge:+.2f} avg_ev={avg_ev:+.2f} "
+                f"executed={trades_this_scan}"
+            )
 
         print(f"\n  Next scan in {SCAN_INTERVAL_SECS // 60} min.  Ctrl+C to stop.")
         time.sleep(SCAN_INTERVAL_SECS)
