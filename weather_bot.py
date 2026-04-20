@@ -1,12 +1,11 @@
 """
-Polymarket Weather Trading Bot  v2.2
+Polymarket Weather Trading Bot  v2.3
 =====================================
-Νέο σε v2.2:
-  ✓ Logistic probability model          (αντί για flat heuristics — καλύτερο calibration)
-  ✓ Debug logging σε calc_signal        (βλέπεις κάθε market/city σύγκριση)
-  ✓ MAX_OPEN_POSITIONS limit            (δεν φορτώνεσαι correlated bets)
-  ✓ Extreme price filter                (skip markets <5% ή >95% — σχεδόν resolved)
-  ✓ Signal stats στο summary            (hit rate, avg EV, avg edge tracking)
+Νέο σε v2.3:
+  ✓ Πλήρες logging στο bot.log          (SCAN/FORECAST/MARKETS/SIGNALS/TRADE/SKIP/SUMMARY)
+  ✓ Κάθε σημαντικό event → log.info     (όχι μόνο print που χάνεται)
+  ✓ "All Gamma API failed" → log.error  (searchable στο log)
+  ✓ Scan summary πάντα logged           (ακόμα και αν 0 signals)
 
 Setup:
   pip install -r requirements.txt
@@ -619,8 +618,8 @@ def print_banner():
     mode = f"{Fore.YELLOW}DRY RUN (paper){Style.RESET_ALL}" if DRY_RUN else f"{Fore.RED}LIVE TRADING{Style.RESET_ALL}"
     print(f"""
 {Fore.BLUE}========================================================
-   Polymarket Weather Bot  v2.2
-   Logistic model | Debug logging | Position limits
+   Polymarket Weather Bot  v2.3
+   Full logging | Logistic model | Position limits
 ========================================================{Style.RESET_ALL}
   Mode     : {mode}
   Bankroll : ${BANKROLL:.0f}  |  Kelly: {KELLY_FRACTION:.0%}  |  Max bet: ${MAX_BET_USDC:.0f}
@@ -666,6 +665,7 @@ def run():
         cycle += 1
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         print(f"\n{Fore.YELLOW}-- Scan #{cycle}  {now} --{Style.RESET_ALL}")
+        log.info(f"=== SCAN #{cycle} START  {now} ===")
 
         # 1. Forecasts
         print(f"\n{Fore.WHITE}[1/3] Fetching forecasts (airport stations):{Style.RESET_ALL}")
@@ -675,17 +675,28 @@ def run():
             if f:
                 forecasts[city] = f
                 print_forecast(f)
+                log.info(
+                    f"[FORECAST] {f.city:<13} "
+                    f"max={f.temp_max_f:.0f}F/{f.temp_max_c:.1f}C  "
+                    f"precip={f.precip_prob:.0f}%  {f.condition}  [{f.station}]"
+                )
             time.sleep(0.4)
+        log.info(f"[FORECAST] fetched {len(forecasts)}/{len(CITIES)} cities")
 
         # 2. Markets
         print(f"\n{Fore.WHITE}[2/3] Fetching Polymarket weather markets...{Style.RESET_ALL}")
         markets = get_weather_markets()
 
         if markets is None:
-            print(f"  {Fore.RED}All Gamma API requests failed — skipping scan.{Style.RESET_ALL}")
+            msg = "All Gamma API requests failed — skipping scan."
+            print(f"  {Fore.RED}{msg}{Style.RESET_ALL}")
+            log.error(f"[MARKETS] {msg}")
+            log.info(f"=== SCAN #{cycle} END  (gamma failure) ===")
             print(f"  Next scan in {SCAN_INTERVAL_SECS // 60} min.  Ctrl+C to stop.")
             time.sleep(SCAN_INTERVAL_SECS)
             continue
+
+        log.info(f"[MARKETS] fetched {len(markets)} liquid weather markets")
 
         # 3. Signals
         print(f"\n{Fore.WHITE}[3/3] Calculating edge + EV + Kelly...{Style.RESET_ALL}")
@@ -704,46 +715,58 @@ def run():
                 seen[mid] = sig
         signals = sorted(seen.values(), key=lambda s: s.ev, reverse=True)
 
+        trades_this_scan = 0
+
         if not signals:
-            print(f"  No signals above edge={MIN_EDGE:.0%} / EV={MIN_EV:.0%} this scan.")
+            msg = f"No signals above edge={MIN_EDGE:.0%} / EV={MIN_EV:.0%} this scan."
+            print(f"  {msg}")
+            log.info(f"[SIGNALS] {msg}")
         else:
             print(f"  {Fore.GREEN}Found {len(signals)} signal(s):{Style.RESET_ALL}")
-            trades_this_scan = 0
             for sig in signals:
                 print_signal(sig)
+                log.info(
+                    f"[SIGNAL] {sig.side} {sig.market.question[:60]}  "
+                    f"edge={sig.edge:+.2f}  ev={sig.ev:+.2f}  "
+                    f"market={sig.market_prob:.2f}  model={sig.model_prob:.2f}  "
+                    f"kelly=${sig.kelly_size}"
+                )
 
                 # Position limit
                 open_count = len(load_positions()["open"])
                 if open_count >= MAX_OPEN_POSITIONS:
-                    print(f"  {Fore.YELLOW}  Max open positions ({MAX_OPEN_POSITIONS}) reached — skipping.{Style.RESET_ALL}")
+                    msg = f"Max open positions ({MAX_OPEN_POSITIONS}) reached — skipping."
+                    print(f"  {Fore.YELLOW}  {msg}{Style.RESET_ALL}")
+                    log.info(f"[SKIP] {msg}")
                     continue
 
                 if has_open_position(sig.market.market_id, sig.side):
-                    print(f"  {Fore.YELLOW}  Already open position — skipping.{Style.RESET_ALL}")
+                    msg = "Already open position — skipping."
+                    print(f"  {Fore.YELLOW}  {msg}{Style.RESET_ALL}")
+                    log.info(f"[SKIP] {msg}")
                     continue
 
                 confirmed = ai_confirm(sig)
                 if confirmed:
                     execute_trade(sig)
                     trades_this_scan += 1
+                    log.info(f"[TRADE] EXECUTED  {sig.side}  ${sig.kelly_size}  {sig.market.question[:55]}")
                 else:
                     print(f"  {Fore.YELLOW}  AI rejected — skipping.{Style.RESET_ALL}")
+                    log.info(f"[SKIP] AI rejected  {sig.market.question[:55]}")
 
-            # Scan summary — useful for calibration review
+            # Scan summary — always logged
             avg_ev   = sum(s.ev   for s in signals) / len(signals)
             avg_edge = sum(s.edge for s in signals) / len(signals)
-            print(
-                f"\n  {Fore.CYAN}Scan summary:{Style.RESET_ALL} "
-                f"{len(signals)} signal(s)  |  "
-                f"avg_edge={avg_edge:+.0%}  avg_EV={avg_ev:+.2f}  |  "
+            summary = (
+                f"signals={len(signals)}  "
+                f"avg_edge={avg_edge:+.0%}  avg_EV={avg_ev:+.2f}  "
                 f"trades_executed={trades_this_scan}"
             )
-            log.info(
-                f"[SCAN #{cycle}] signals={len(signals)} "
-                f"avg_edge={avg_edge:+.2f} avg_ev={avg_ev:+.2f} "
-                f"executed={trades_this_scan}"
-            )
+            print(f"\n  {Fore.CYAN}Scan summary:{Style.RESET_ALL} {summary}")
+            log.info(f"[SUMMARY] {summary}")
 
+        log.info(f"=== SCAN #{cycle} END ===")
         print(f"\n  Next scan in {SCAN_INTERVAL_SECS // 60} min.  Ctrl+C to stop.")
         time.sleep(SCAN_INTERVAL_SECS)
 
