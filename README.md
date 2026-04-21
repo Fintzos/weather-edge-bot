@@ -69,9 +69,6 @@ Currently setting up the repo, structure, and workflow before moving into full i
 ## Disclaimer
 
 This is an experimental research project.
-
-Nothing here is financial advice, and nothing in this repository should be treated as a guaranteed trading strategy.
-
 The purpose of the project is to learn, test, iterate, and build.
 
 ---
